@@ -52,7 +52,7 @@ def convert_param_value(key: str, value: str) -> Any:
 app = Flask(__name__)
 
 # Configure logging based on DEBUG environment variable
-log_level = logging.DEBUG if os.getenv('DEBUG', 'false').lower() == 'true' else logging.INFO
+log_level = logging.DEBUG if os.getenv('DEBUG', 'true').lower() == 'true' else logging.INFO
 logging.basicConfig(
     level=log_level,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -60,7 +60,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configure target URL
-TARGET_BASE_URL = os.getenv('TARGET_BASE_URL', 'https://api.openai.com/v1/')
+TARGET_BASE_URL = os.getenv('TARGET_BASE_URL', 'http://localhost:11434/api/chat')
 if not TARGET_BASE_URL.endswith('/'):
     TARGET_BASE_URL += '/'  # Ensure trailing slash for urljoin
 
@@ -118,39 +118,6 @@ def proxy(path):
         # Get JSON body if present
         json_body = request.get_json(silent=True) if request.is_json else None
         logger.debug(f"Request JSON body: {json_body}")
-        
-        # Apply model-specific LLM parameter overrides from environment
-        if json_body and (llm_params := os.getenv('LLM_PARAMS')):
-            # Parse model configurations: "model=MODEL1,param1=val1,param2=val2;model=MODEL2,param3=val3"
-            model_configs = {}
-            for model_entry in llm_params.split(';'):
-                model_entry = model_entry.strip()
-                if not model_entry or not model_entry.startswith('model='):
-                    continue
-                
-                # Split into model declaration and parameters
-                parts = model_entry.split(',')
-                model_name = parts[0].split('=', 1)[1].strip()
-                model_configs[model_name] = {}
-                
-                # Process parameters after model declaration
-                for param in parts[1:]:
-                    param = param.strip()
-                    if '=' in param:
-                        key, value = param.split('=', 1)
-                        key = key.strip()
-                        value = value.strip()
-                        model_configs[model_name][key] = convert_param_value(key, value)
-            
-            # Get target model from request
-            target_model = json_body.get('model')
-            if target_model and target_model in model_configs:
-                logger.debug(f"Applying parameters for model: {target_model}")
-                for key, value in model_configs[target_model].items():
-                    json_body[key] = value
-                    logger.debug(f"Overriding parameter: {key} = {value}")
-            elif target_model:
-                logger.debug(f"No configuration found for model: {target_model}")
         
         # Try to connect with a timeout
         try:
@@ -214,45 +181,66 @@ def proxy(path):
     class StreamBuffer:
         def __init__(self):
             self.buffer = ""
-            
+            self.leading_newlines_removed = False  # Track if leading newlines have been removed
+
         def process_chunk(self, chunk):
             # Decode and add to buffer
             decoded_chunk = chunk.decode("utf-8", errors="replace")
             self.buffer += decoded_chunk
-            
+
             output = ""
-            
+
+            # Remove leading newlines (before the first number or letter) if not already done
+            if not self.leading_newlines_removed:
+                self.buffer = re.sub(r'^\s+', '', self.buffer)
+                self.leading_newlines_removed = True  # Mark as done
+
             while True:
-                # Find the next potential tag start
-                start = self.buffer.find("<think>")
-                
+                # Find the next potential tag start (both regular and Unicode-encoded)
+                start = min(
+                    self.buffer.find("<think>"),
+                    self.buffer.find("\\u003cthink\\u003e"),
+                    key=lambda x: x if x != -1 else float('inf')
+                )
+
                 if start == -1:
                     # No more think tags, output all except last few chars
                     if len(self.buffer) > 1024:
                         output += self.buffer[:-1024]
                         self.buffer = self.buffer[-1024:]
                     break
-                
+
                 # Output content before the tag
                 if start > 0:
                     output += self.buffer[:start]
                     self.buffer = self.buffer[start:]
                     start = 0  # Tag is now at start of buffer
-                
-                # Look for end tag
-                end = self.buffer.find("</think>", start)
+
+                # Look for end tag (both regular and Unicode-encoded)
+                end = min(
+                    self.buffer.find("</think>", start),
+                    self.buffer.find("\\u003c/think\\u003e", start),
+                    key=lambda x: x if x != -1 else float('inf')
+                )
+
                 if end == -1:
                     # No end tag yet, keep in buffer
                     break
-                
+
                 # Remove the complete think tag and its content
-                end += len("</think>")
+                if self.buffer.startswith("<think>"):
+                    end += len("</think>")
+                else:
+                    end += len("\\u003c/think\\u003e")
                 self.buffer = self.buffer[end:]
-            
+
             return output.encode("utf-8") if output else b""
-            
+
         def flush(self):
-            # Output remaining content
+            # Output remaining content and ensure leading newlines are removed
+            if not self.leading_newlines_removed:
+                self.buffer = re.sub(r'^\s+', '', self.buffer)
+                self.leading_newlines_removed = True
             output = self.buffer
             self.buffer = ""
             return output.encode("utf-8")
@@ -260,12 +248,19 @@ def proxy(path):
     # Check if response should be streamed
     is_stream = json_body.get('stream', False) if json_body else False
     logger.debug(f"Stream mode: {is_stream}")
-    
+
     if not is_stream:
         # For non-streaming responses, return the full content
         content = api_response.content
         decoded = content.decode("utf-8", errors="replace")
-        filtered = re.sub(r'<think>.*?</think>', '', decoded, flags=re.DOTALL)
+
+        # Strip both regular and Unicode-encoded <think> tags
+        filtered = re.sub(r'(<think>.*?</think>|\\u003cthink\\u003e.*?\\u003c/think\\u003e)', '', decoded,
+                          flags=re.DOTALL)
+
+        # Remove leading newlines (before the first number or letter)
+        filtered = re.sub(r'^\s+', '', filtered)
+
         logger.debug(f"Non-streaming response content: {filtered}")
         return Response(
             filtered.encode("utf-8"),
