@@ -104,7 +104,7 @@ curl http://localhost:5000/v1/chat/completions \
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python cot_proxy.py
+python ollama_proxy.py
 ```
 
 ## Configuration

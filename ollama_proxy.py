@@ -60,7 +60,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configure target URL
-TARGET_BASE_URL = os.getenv('TARGET_BASE_URL', 'http://localhost:11434/api/chat')
+TARGET_BASE_URL = os.getenv('TARGET_BASE_URL', 'http://localhost:11434/api/chat') # Ollama chat endpoint
 if not TARGET_BASE_URL.endswith('/'):
     TARGET_BASE_URL += '/'  # Ensure trailing slash for urljoin
 
